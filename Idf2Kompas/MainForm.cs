@@ -17,9 +17,7 @@ namespace Idf2Kompas
         private IdfBoard _board;
         private DataTable _preview;
         private AppSettings _settings = SettingsService.Load();
-
         private string _brdPath, _proPath, _csvPath;
-
         public MainForm()
         {
             InitializeComponent();
@@ -160,7 +158,9 @@ namespace Idf2Kompas
                 {
                     _preview.Rows.Add(
                         p.RefDes,
-                        p.Comment,
+                        string.IsNullOrWhiteSpace(p.Comment)
+                            ? p.PartNameFromIdf               // ← fallback: наименование из BRD
+                            : p.Comment,                        // ← первично из BOM
                         p.Body,
                         ResolveModelName(p),
                         p.FootprintFromBom,
@@ -294,7 +294,6 @@ namespace Idf2Kompas
                 MessageBox.Show(this, ex.ToString(), "Ошибка КОМПАС", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
-
        
 
         private void MainForm_Load(object sender, EventArgs e)
@@ -304,6 +303,13 @@ namespace Idf2Kompas
 
        
         private void MainForm_Load_1(object sender, EventArgs e)
+        {
+
+        }
+
+      
+
+        private void MainForm_Load_2(object sender, EventArgs e)
         {
 
         }

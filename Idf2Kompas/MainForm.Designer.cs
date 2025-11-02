@@ -1,26 +1,7 @@
 namespace Idf2Kompas
 {
     partial class MainForm
-    {
-        private System.ComponentModel.IContainer components = null;
-        private System.Windows.Forms.Panel topPanel;
-        private System.Windows.Forms.Button btnBrowseBrd;
-        private System.Windows.Forms.Button btnBrowsePro;
-        private System.Windows.Forms.Button btnBrowseCsv;
-        private System.Windows.Forms.Button btnParse;
-        private System.Windows.Forms.Button btnWriteIdf;
-        private System.Windows.Forms.Button btnSettings;
-        private System.Windows.Forms.Button btnBuildKompas;
-        private System.Windows.Forms.Label lblAsm;
-        private System.Windows.Forms.Label lblBoard;
-        private System.Windows.Forms.DataGridView gridPreview;
-
-        protected override void Dispose(bool disposing)
-        {
-            if (disposing && (components != null)) components.Dispose();
-            base.Dispose(disposing);
-        }
-
+    {       
         private void InitializeComponent()
         {
             this.topPanel = new System.Windows.Forms.Panel();
@@ -96,5 +77,26 @@ namespace Idf2Kompas
             ((System.ComponentModel.ISupportInitialize)(this.gridPreview)).EndInit();
             this.ResumeLayout(false);
         }
+
+
+        private System.ComponentModel.IContainer components = null;
+        private System.Windows.Forms.Panel topPanel;
+        private System.Windows.Forms.Button btnBrowseBrd;
+        private System.Windows.Forms.Button btnBrowsePro;
+        private System.Windows.Forms.Button btnBrowseCsv;
+        private System.Windows.Forms.Button btnParse;
+        private System.Windows.Forms.Button btnWriteIdf;
+        private System.Windows.Forms.Button btnSettings;
+        private System.Windows.Forms.Button btnBuildKompas;
+        private System.Windows.Forms.Label lblAsm;
+        private System.Windows.Forms.Label lblBoard;
+        private System.Windows.Forms.DataGridView gridPreview;
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && (components != null)) components.Dispose();
+            base.Dispose(disposing);
+        }
+
     }
 }
