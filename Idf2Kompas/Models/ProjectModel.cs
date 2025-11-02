@@ -28,8 +28,10 @@ namespace Idf2Kompas.Models
     {
         public string Designator { get; set; }
         public string Body { get; set; }
-        public string Comment { get; set; }
-        public string StockCode { get; set; }
-        public string Description { get; set; }
+        public string Comment { get; set; }      // BRD
+        public string StockCode { get; set; }     // BOM
+        public string ManufacturerPN { get; set; } // BOM
+        public string Description { get; set; }    // BOM
+        public string Type { get; set; }           // BOM 
     }
 }

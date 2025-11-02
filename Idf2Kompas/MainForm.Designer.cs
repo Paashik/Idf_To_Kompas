@@ -91,7 +91,6 @@ namespace Idf2Kompas
         private System.Windows.Forms.Label lblAsm;
         private System.Windows.Forms.Label lblBoard;
         private System.Windows.Forms.DataGridView gridPreview;
-
         protected override void Dispose(bool disposing)
         {
             if (disposing && (components != null)) components.Dispose();

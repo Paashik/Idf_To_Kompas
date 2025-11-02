@@ -33,6 +33,69 @@ namespace Idf2Kompas
             gridPreview.DataBindingComplete += GridPreview_DataBindingComplete;
         }
 
+        // Выбор имени модели по настройкам (без использования Comment из BOM)
+        /// <summary>Выбор имени модели по настройкам для превью (работаем с IdfPlacement).</summary>
+        private string ResolveModelNameBySettings(IdfPlacement p)
+        {
+            if (p == null) return null;
+            string NN(string s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
+
+            var src = (_settings?.ModelNameSource ?? "").Trim().ToUpperInvariant();
+            switch (src)
+            {
+                case "BODY": return NN(p.Body) ?? NN(p.FootprintFromIdf) ?? NN(p.PartNameFromIdf) ?? NN(p.Comment);
+                case "FOOTPRINT": return NN(p.FootprintFromIdf) ?? NN(p.Body) ?? NN(p.PartNameFromIdf) ?? NN(p.Comment);
+                case "NAME":
+                case "COMMENT": return NN(p.PartNameFromIdf) ?? NN(p.Comment) ?? NN(p.Body) ?? NN(p.FootprintFromIdf);
+                default: return NN(p.Body) ?? NN(p.FootprintFromIdf) ?? NN(p.PartNameFromIdf) ?? NN(p.Comment);
+            }
+        }
+
+        /// <summary>Проверка наличия файла модели в библиотеке.</summary>
+        private bool TryFindModelPath(string modelName, out string fullPath)
+        {
+            fullPath = null;
+            if (string.IsNullOrWhiteSpace(modelName)) return false;
+            try
+            {
+                fullPath = global::Idf2Kompas.Services.LibraryHelper.FindModelPath(_settings?.LibDir, modelName);
+                return !string.IsNullOrWhiteSpace(fullPath) && File.Exists(fullPath);
+            }
+            catch { return false; }
+        }
+
+        /// <summary>Безопасно задает заголовок колонки.</summary>
+        private static void TrySetHeader(DataGridView grid, string columnName, string headerText)
+        {
+            if (grid == null || grid.Columns == null) return;
+
+            if (grid.Columns.Contains(columnName))
+            {
+                grid.Columns[columnName].HeaderText = headerText;
+                return;
+            }
+
+            foreach (DataGridViewColumn col in grid.Columns)
+            {
+                if (string.Equals(col.Name, columnName, StringComparison.OrdinalIgnoreCase))
+                {
+                    col.HeaderText = headerText;
+                    break;
+                }
+            }
+        }
+
+        private void gridPreview_DataBindingComplete(object sender, DataGridViewBindingCompleteEventArgs e)
+        {
+            foreach (DataGridViewRow row in gridPreview.Rows)
+            {
+                var flag = Convert.ToString(row.Cells["ModelExists"]?.Value);
+                if (flag == "×")
+                    row.DefaultCellStyle.BackColor = System.Drawing.Color.MistyRose;
+            }
+        }
+        /// <summary>Безопасно переименовывает заголовок столбца, если он есть.</summary>
+        
         protected override void OnLoad(EventArgs e)
         {
             base.OnLoad(e);
@@ -95,12 +158,27 @@ namespace Idf2Kompas
             var src = (_settings.ModelNameSource ?? "Body").ToLowerInvariant();
             switch (src)
             {
-                case "footprint": return p.FootprintFromBom ?? p.FootprintFromIdf;
-                case "comment": return p.Comment;
-                case "pn": return p.PN;
-                default: return p.Body;
+                case "footprint":
+                case "fp":
+                    // Предпочтение посадочному из BRD, затем из BOM (если есть)
+                    return string.IsNullOrWhiteSpace(p.FootprintFromIdf)
+                        ? (p.FootprintFromBom ?? p.FootprintFromIdf)
+                        : p.FootprintFromIdf;
+
+                case "comment":
+                case "name":
+                    // Имя из BRD (если есть PartNameFromIdf, иначе Comment из BRD)
+                    return string.IsNullOrWhiteSpace(p.PartNameFromIdf) ? p.Comment : p.PartNameFromIdf;
+
+                case "pn":
+                    return p.PN;
+
+                case "body":
+                default:
+                    return p.Body;
             }
         }
+
 
         private void OpenSettings()
         {
@@ -149,32 +227,68 @@ namespace Idf2Kompas
         private void BuildPreview()
         {
             _preview = new DataTable();
-            foreach (var c in new[] { "RefDes", "Comment", "Body", "Model", "Footprint(BOM)", "Footprint(IDF)", "StockCode", "Side", "X", "Y", "Rot" })
+            foreach (var c in new[]
+            {
+        "RefDes",         // BRD
+        "Name",           // BRD (PartNameFromIdf / Comment из BRD)
+        "Footprint",      // BRD (FootprintFromIdf)
+        "Model",          // выбранное имя модели по настройке
+        "StockCode",      // BOM
+        "ManufacturerPN", // BOM
+        "Description",    // BOM
+        "Body",           // BOM
+        "Type",           // BOM
+        "Side",           // BRD
+        "X",              // BRD
+        "Y",              // BRD
+        "Rot"             // BRD
+    })
                 _preview.Columns.Add(c);
 
             if (_board?.Placements != null)
             {
                 foreach (var p in _board.Placements)
                 {
+                    // Имя компонента — из BRD (если PartNameFromIdf пуст, берём Comment из BRD)
+                    var uiName = string.IsNullOrWhiteSpace(p.PartNameFromIdf) ? p.Comment : p.PartNameFromIdf;
+
+                    // Имя модели по настройке (см. ResolveModelName ниже)
+                    var modelName = ResolveModelName(p);
+
                     _preview.Rows.Add(
-                        p.RefDes,
-                        string.IsNullOrWhiteSpace(p.Comment)
-                            ? p.PartNameFromIdf               // ← fallback: наименование из BRD
-                            : p.Comment,                        // ← первично из BOM
-                        p.Body,
-                        ResolveModelName(p),
-                        p.FootprintFromBom,
-                        p.FootprintFromIdf,
-                        p.PN,
-                        p.Side,
-                        p.X.ToString("0.###"),
-                        p.Y.ToString("0.###"),
-                        p.RotDeg.ToString("0.###")
+                        p.RefDes,                       // BRD
+                        uiName,                         // BRD
+                        p.FootprintFromIdf,             // BRD
+                        modelName,                      // рассчитанное имя модели
+                        p.PN,                           // BOM: Stock Code
+                        p.ManufacturerPN,               // BOM (если поле добавлено в IdfPlacement)
+                        p.Description,                  // BOM (если поле добавлено в IdfPlacement)
+                        p.Body,                         // BOM
+                        p.Type,                         // BOM (если поле добавлено в IdfPlacement)
+                        p.Side,                         // BRD
+                        p.X.ToString("0.###"),          // BRD (мм)
+                        p.Y.ToString("0.###"),          // BRD (мм)
+                        p.RotDeg.ToString("0.###")      // BRD (deg)
                     );
                 }
             }
 
             gridPreview.DataSource = _preview;
+
+            // Переименуем заголовки для наглядности
+            TrySetHeader(gridPreview, "RefDes", "Designator (BRD)");
+            TrySetHeader(gridPreview, "Name", "Name (BRD)");
+            TrySetHeader(gridPreview, "Footprint", "Footprint (BRD)");
+            TrySetHeader(gridPreview, "Model", $"Model (Source: {_settings?.ModelNameSource})");
+            TrySetHeader(gridPreview, "StockCode", "Stock Code (BOM)");
+            TrySetHeader(gridPreview, "ManufacturerPN", "Manufacturer P/N (BOM)");
+            TrySetHeader(gridPreview, "Description", "Description (BOM)");
+            TrySetHeader(gridPreview, "Body", "Body (BOM)");
+            TrySetHeader(gridPreview, "Type", "Type (BOM)");
+            TrySetHeader(gridPreview, "Side", "Side (BRD)");
+            TrySetHeader(gridPreview, "X", "X (BRD, mm)");
+            TrySetHeader(gridPreview, "Y", "Y (BRD, mm)");
+            TrySetHeader(gridPreview, "Rot", "Rot (BRD, deg)");
         }
 
         private void GridPreview_DataBindingComplete(object sender, DataGridViewBindingCompleteEventArgs e)
@@ -265,10 +379,12 @@ namespace Idf2Kompas
                         model.BomRows.Add(new Idf2Kompas.Models.ProjectBomRow
                         {
                             Designator = p.RefDes,
-                            Body = ResolveModelName(p),
-                            Comment = p.Comment,
-                            StockCode = p.PN,
-                            Description = p.PartNameFromIdf
+                            Body = p.Body,           // из BOM (как и в превью)
+                            Comment = p.PartNameFromIdf, // имя из BRD
+                            StockCode = p.PN,              // BOM
+                            ManufacturerPN = p.ManufacturerPN,  // BOM
+                            Description = p.Description,     // BOM
+                            Type = p.Type             // BOM
                         });
                     }
                 }
@@ -310,6 +426,13 @@ namespace Idf2Kompas
       
 
         private void MainForm_Load_2(object sender, EventArgs e)
+        {
+
+        }
+
+        
+
+        private void MainForm_Load_3(object sender, EventArgs e)
         {
 
         }

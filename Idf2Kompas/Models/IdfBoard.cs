@@ -35,13 +35,16 @@ namespace Idf2Kompas.Models
     public sealed class IdfPlacement
     {
         public string RefDes { get; set; }
-        public string Comment { get; set; }
-        public string Body { get; set; }
-        public string PN { get; set; }
+        public string Comment { get; set; }   // Имя/комментарий ИЗ BRD
+        public string Body { get; set; }     // Из BOM (модель/корпус в UI)
+        public string PN { get; set; }        // Stock Code (BOM)
         public string FootprintFromBom { get; set; }
-        public string FootprintFromIdf { get; set; }
-        public string PartNameFromIdf { get; set; }
-
+        public string FootprintFromIdf { get; set; }   // Посадочное ИЗ BRD
+        public string PartNameFromIdf { get; set; }   // Имя ИЗ BRD
+        public string ManufacturerPN { get; set; }         // Manufacturer P/N (BOM)
+        public string Description { get; set; }            // Description (BOM)
+        public string Type { get; set; }                   // Type (BOM)
+       
         /// <summary>TOP/BOTTOM (если известно).</summary>
         public string Side { get; set; }
 

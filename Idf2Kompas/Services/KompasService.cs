@@ -5,12 +5,15 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows.Forms;
+
 using Kompas6API5;            // API5: ksDocument3D, ksPart, ksPlacement, эскизы/экструзии
 using Kompas6Constants3D;     // Obj3dType, Direction_Type, End_Type
 using Kompas6Constants;       // Part_Type
+
 using static Idf2Kompas.Parsers.IdfGeometry; // OutlineRings, Pt
-using Idf2Kompas.Models;      // ProjectModel, AppSettings
-using Idf2Kompas.Parsers;     // IdfGeometry
+
+using Idf2Kompas.Models;     // ProjectModel, AppSettings, ProjectPlacement, IdfBoard, ...
+using Idf2Kompas.Parsers;    // IdfGeometry
 
 namespace Idf2Kompas.Services
 {
@@ -30,7 +33,6 @@ namespace Idf2Kompas.Services
                 MessageBox.Show("Контур платы пуст.", "КОМПАС", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
-
             var usedThickness = outline.ThicknessMm > 0 ? outline.ThicknessMm : model.BoardThickness;
             if (usedThickness <= 0)
             {
@@ -81,14 +83,15 @@ namespace Idf2Kompas.Services
             }
 
             var placeLog = new StringBuilder();
-            LogAppend(placeLog, "=== FAST PLACEMENT (CopyPart + bottom flip + single rebuild) ===");
+            LogAppend(placeLog, "=== PLACEMENT TRACE (API5 placement) ===");
 
             // Инфо по плате
             double minX, minY, maxX, maxY;
             ComputeOutlineBBox(outline, out minX, out minY, out maxX, out maxY);
-            LogAppend(placeLog, $"Board BBox mm: X=[{minX:0.###}..{maxX:0.###}] Y=[{minY:0.###}..{maxY:0.###}] T={usedThickness:0.###}");
+            LogAppend(placeLog, string.Format("Board BBox mm: X=[{0:0.###}..{1:0.###}] Y=[{2:0.###}..{3:0.###}] T={4:0.###}",
+                                              minX, maxX, minY, maxY, usedThickness));
 
-            // Вставим плату как компонент (базовая деталь)
+            // Вставим плату как компонент
             var boardComp = (ksPart)doc3D.GetPart((short)Part_Type.pNew_Part);
             bool okInsBoard = false;
             try { okInsBoard = doc3D.SetPartFromFileEx(boardM3D, boardComp, true, true); } catch { }
@@ -99,77 +102,59 @@ namespace Idf2Kompas.Services
                 return;
             }
 
-            // ===== УСКОРЕНИЕ: кеш прототипов и размещение через CopyPart =====
-            var srcCache = new Dictionary<string, ksPart>(StringComparer.OrdinalIgnoreCase);
-            char bottomFlipAxis = 'X'; // при необходимости смените на 'Y'
-
+            // Корпуса
             int placed = 0, skipped = 0;
             if (model.Placements != null)
             {
                 for (int i = 0; i < model.Placements.Count; i++)
                 {
                     var p = model.Placements[i];
-                    var libPath = LibraryHelper.FindModelPath(settings.LibDir, p.Body);
-                    double targetZ = p.IsBottomSide ? -usedThickness : 0.0;
 
-                    LogAppend(placeLog,
-                        $"RAW→ASM: {p.Designator} body={p.Body} X={p.Xmm} Y={p.Ymm} Z={targetZ} Side={(p.IsBottomSide ? "BOTTOM" : "TOP")} RotCW={p.RotationDeg}");
+                    // === ВАЖНО: выбор имени модели строго по настройке ===
+                    // (в ProjectPlacement гарантированно есть Body из BOM; полей из BRD тут нет)
+                    var modelName = ResolveModelNameBySettings(p, settings);
+                    var libPath = global::Idf2Kompas.Services.LibraryHelper.FindModelPath(settings.LibDir, modelName);
+
+                    LogAppend(placeLog, string.Format(
+                        "RAW→ASM: {0} body={1} modelName={2} Xmm={3} Ymm={4} Z={5} Side={6} RotCW={7}",
+                        p.Designator, p.Body, modelName, p.Xmm, p.Ymm,
+                        p.IsBottomSide ? -usedThickness : 0.0,
+                        p.IsBottomSide ? "BOTTOM" : "TOP",
+                        p.RotationDeg));
 
                     if (string.IsNullOrWhiteSpace(libPath) || !File.Exists(libPath))
                     {
-                        LogAppend(placeLog, "SKIP(no model): " + p.Designator + " → " + (p.Body ?? ""));
+                        LogAppend(placeLog, "SKIP(no model): " + p.Designator + " → " + (modelName ?? ""));
                         skipped++;
                         continue;
                     }
 
-                    try
+                    // Вставка API5
+                    var comp = (ksPart)doc3D.GetPart((short)Part_Type.pNew_Part);
+                    bool ok5 = false;
+                    try { ok5 = doc3D.SetPartFromFileEx(libPath, comp, true, true); } catch { }
+                    if (!ok5) { try { ok5 = doc3D.SetPartFromFile(libPath, comp); } catch { } }
+                    if (!ok5)
                     {
-                        ksPart srcPart;
-                        if (!srcCache.TryGetValue(libPath, out srcPart))
-                        {
-                            // Первое появление этой модели → вставка из файла с корректным плейсментом (с учётом bottom)
-                            srcPart = InsertOnceFromFile_WithPlacement_BottomAware(
-                                doc3D, libPath,
-                                p.Xmm, p.Ymm, targetZ,
-                                p.RotationDeg, p.IsBottomSide, bottomFlipAxis);
-
-                            srcCache[libPath] = srcPart;
-                            placed++;
-                            LogAppend(placeLog, $"OK[FIRST]: {p.Designator} at ({p.Xmm:0.###},{p.Ymm:0.###},{targetZ:0.###})");
-                        }
-                        else
-                        {
-                            // Повторные экземпляры → быстрые копии
-                            var pl = CreatePlacement_BottomAware(
-                                doc3D,
-                                p.Xmm, p.Ymm, targetZ,
-                                p.RotationDeg, p.IsBottomSide, bottomFlipAxis);
-
-                            var comp = TryCopyPart(doc3D, srcPart, pl);
-                            if (comp == null)
-                            {
-                                // Фолбэк, если CopyPart недоступен
-                                comp = InsertOnceFromFile_WithPlacement_BottomAware(
-                                    doc3D, libPath, p.Xmm, p.Ymm, targetZ,
-                                    p.RotationDeg, p.IsBottomSide, bottomFlipAxis);
-                            }
-
-                            placed++;
-                            LogAppend(placeLog, $"OK[COPY]:  {p.Designator} at ({p.Xmm:0.###},{p.Ymm:0.###},{targetZ:0.###})");
-                        }
-                    }
-                    catch (Exception ex)
-                    {
+                        LogAppend(placeLog, "FAIL(API5 insert): " + p.Designator);
                         skipped++;
-                        LogAppend(placeLog, "FAIL(place): " + p.Designator + " → " + ex.Message);
+                        continue;
+                    }
+
+                    // Позиционируем через ksPlacement
+                    double z = p.IsBottomSide ? -usedThickness : 0.0;
+                    bool placedOk = TryPlaceComponentApi5_Typed(comp, p.Xmm, p.Ymm, z, p.RotationDeg, placeLog);
+                    if (placedOk)
+                        placed++;
+                    else
+                    {
+                        LogAppend(placeLog, "OK5 inserted, PLACE FAIL (stays at origin): " + p.Designator);
+                        placed++; // компонент вставлен, но остался в (0,0,0)
                     }
                 }
             }
 
-            // ===== ОДИН раз перестраиваем документ =====
-            try { doc3D.RebuildDocument(); } catch { }
-
-            // Сохранение сборки
+            // Сохраняем сборку
             try
             {
                 if (!string.IsNullOrWhiteSpace(asmOutPath))
@@ -180,6 +165,8 @@ namespace Idf2Kompas.Services
             }
             catch { }
 
+            try { doc3D.RebuildDocument(); } catch { }
+
             // Лог рядом со сборкой
             try
             {
@@ -189,11 +176,11 @@ namespace Idf2Kompas.Services
             catch { }
 
             MessageBox.Show(
-                "Сборка создана (ускоренный режим с переворотом нижнего слоя).\n" +
-                $"Плата: T = {usedThickness:0.###} мм, контуров: {outline.Rings.Count}\n" +
-                $"Отверстий (после фильтра): {filtHoles.Count}\n" +
-                $"Корпусов: вставлено {placed}, пропущено {skipped}\n" +
-                $"Файлы:\n Плата: {boardM3D}\n Сборка: {asmOutPath}",
+                "Сборка создана.\n" +
+                string.Format("Плата: T = {0:0.###} мм, контуров: {1}\n", usedThickness, outline.Rings.Count) +
+                string.Format("Отверстий (после фильтра): {0}\n", filtHoles.Count) +
+                string.Format("Корпусов: вставлено {0}, пропущено {1}\n", placed, skipped) +
+                string.Format("Файлы:\n Плата: {0}\n Сборка: {1}", boardM3D, asmOutPath),
                 "КОМПАС — готово", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
@@ -349,6 +336,7 @@ namespace Idf2Kompas.Services
                             n++;
                         }
                         hDef.EndEdit();
+
                         if (n > 0)
                         {
                             var cut = (ksEntity)part.NewEntity((short)Obj3dType.o3d_cutExtrusion);
@@ -418,238 +406,165 @@ namespace Idf2Kompas.Services
             try { if (log != null) log.AppendLine(line); } catch { }
         }
 
-        private static void TryUpdatePlacement(ksPart part)
+        // ---------- Размещение API5 через ksPlacement (типизированно) ----------
+        private static bool TryPlaceComponentApi5_Typed(ksPart comp, double x, double y, double z, double rotCWdeg, StringBuilder log)
         {
-            try { part.UpdatePlacement(); } catch { }
-        }
-
-        // ======================= УСКОРЕННЫЕ ВСТАВКИ (с bottom flip) =======================
-
-        /// <summary>
-        /// Построить матрицу R (3x3) для TOP/BOTTOM: Z-поворот + при необходимости разворот 180° по оси.
-        /// Возвращает элементы R (row-major).
-        /// </summary>
-        private static void BuildRotationBottomAware(double rotCWdeg, bool isBottom, char bottomFlipAxis,
-                                                     out double r00, out double r01, out double r02,
-                                                     out double r10, out double r11, out double r12,
-                                                     out double r20, out double r21, out double r22)
-        {
-            // TOP: rzCCW = -CW; BOTTOM: rzCCW = +CW
-            double rzCCW = isBottom ? +rotCWdeg : -rotCWdeg;
-            double a = rzCCW * Math.PI / 180.0;
-            double cz = Math.Cos(a), sz = Math.Sin(a);
-
-            // Базовый Rz
-            r00 = cz; r01 = -sz; r02 = 0;
-            r10 = sz; r11 = cz; r12 = 0;
-            r20 = 0; r21 = 0; r22 = 1;
-
-            if (isBottom)
+            try
             {
-                // Чистый Rx(pi) или Ry(pi) справа: инверсия двух столбцов
-                if (bottomFlipAxis == 'Y' || bottomFlipAxis == 'y')
+                if (comp == null) { LogAppend(log, "Place5: comp is null"); return false; }
+
+                // 1) получить ksPlacement типобезопасно
+                ksPlacement placement = null;
+                try
                 {
-                    // R = R * Ry(pi): инвертируем столбцы X и Z
-                    r00 = -r00; r02 = -r02;
-                    r10 = -r10; r12 = -r12;
-                    r20 = -r20; r22 = -r22;
+                    placement = (ksPlacement)comp.GetPlacement(); // обычный путь
+                }
+                catch
+                {
+                    // если RCW «сырое», пробуем через IUnknown → ksPlacement
+                    object raw = comp.GetPlacement();
+                    if (raw != null)
+                    {
+                        IntPtr unk = IntPtr.Zero;
+                        try
+                        {
+                            unk = Marshal.GetIUnknownForObject(raw);
+                            placement = (ksPlacement)Marshal.GetTypedObjectForIUnknown(unk, typeof(ksPlacement));
+                        }
+                        finally
+                        {
+                            if (unk != IntPtr.Zero) Marshal.Release(unk);
+                        }
+                    }
+                }
+                if (placement == null)
+                {
+                    LogAppend(log, "Place5: ksPlacement cast FAILED");
+                    return false;
+                }
+
+                // 2) Определяем тип трансформации: если z < 0 (bottom слой), нужно отразить
+                bool isBottom = z < 0;
+
+                // 3) Собираем матрицу с учетом слоя
+                double a = -rotCWdeg * Math.PI / 180.0;
+                double c = Math.Cos(a), s = Math.Sin(a);
+                double[] m;
+
+                if (isBottom)
+                {
+                    // Для bottom: отражение по X + поворот + разворот по Z
+                    m = new double[]
+                    {
+                        c,  s,  0,  x,
+                        s, -c,  0,  y,
+                        0,  0, -1,  z,
+                        0,  0,  0,  1
+                    };
+                    LogAppend(log, $"Place5: Bottom component - mirrored and rotated {rotCWdeg}°");
                 }
                 else
                 {
-                    // R = R * Rx(pi): инвертируем столбцы Y и Z
-                    r01 = -r01; r02 = -r02;
-                    r11 = -r11; r12 = -r12;
-                    r21 = -r21; r22 = -r22;
+                    // Для top: обычная матрица
+                    m = new double[]
+                    {
+                        c, -s,  0,  x,
+                        s,  c,  0,  y,
+                        0,  0,  1,  z,
+                        0,  0,  0,  1
+                    };
+                    LogAppend(log, $"Place5: Top component - rotated {rotCWdeg}°");
                 }
+
+                // 4) пробуем матрицей
+                if (TryPlacementSetMatrix(placement, m))
+                {
+                    comp.SetPlacement(placement);
+                    try { comp.UpdatePlacement(); } catch { }
+                    LogAppend(log, $"Place5: Success with matrix at ({x}, {y}, {z})");
+                    return true;
+                }
+
+                // 5) fallback: origin+axes
+                bool okOrigin = TryPlacementSetOrigin(placement, x, y, z);
+                bool okAxes;
+                if (isBottom)
+                {
+                    okAxes = TryPlacementSetAxes(placement, c, s, 0.0, s, -c, 0.0, 0.0, 0.0, -1.0);
+                }
+                else
+                {
+                    okAxes = TryPlacementSetAxes(placement, c, -s, 0.0, s, c, 0.0, 0.0, 0.0, 1.0);
+                }
+
+                if (okOrigin || okAxes)
+                {
+                    comp.SetPlacement(placement);
+                    try { comp.UpdatePlacement(); } catch { }
+                    LogAppend(log, $"Place5: Success with origin/axes at ({x}, {y}, {z})");
+                    return true;
+                }
+
+                LogAppend(log, "Place5: no matrix/origin/axes methods on ksPlacement");
+                return false;
             }
-        }
-
-        /// <summary>
-        /// Первый экземпляр: вставка из файла + сразу задать placement (InitByMatrix3D + fallback).
-        /// </summary>
-        private static ksPart InsertOnceFromFile_WithPlacement_BottomAware(
-            ksDocument3D doc3D,
-            string filePath,
-            double x, double y, double z,
-            double rotCWdeg, bool isBottom, char bottomFlipAxis)
-        {
-            if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath))
-                throw new FileNotFoundException("Model not found", filePath);
-
-            var part = (ksPart)doc3D.GetPart((short)Part_Type.pNew_Part);
-            bool ok = false;
-            try { ok = doc3D.SetPartFromFileEx(filePath, part, true, false); } catch { }
-            if (!ok) { try { ok = doc3D.SetPartFromFile(filePath, part); } catch { } }
-            if (!ok) throw new InvalidOperationException("SetPartFromFile* failed: " + filePath);
-
-            // Поворот
-            double r00, r01, r02, r10, r11, r12, r20, r21, r22;
-            BuildRotationBottomAware(rotCWdeg, isBottom, bottomFlipAxis,
-                                     out r00, out r01, out r02,
-                                     out r10, out r11, out r12,
-                                     out r20, out r21, out r22);
-
-            var pl = (ksPlacement)part.GetPlacement();
-
-            // row-major 4x4
-            double[] mRow = {
-                r00, r01, r02, x,
-                r10, r11, r12, y,
-                r20, r21, r22, z,
-                0,   0,   0,   1
-            };
-            // col-major (на всякий случай)
-            double[] mCol = {
-                r00, r10, r20, 0,
-                r01, r11, r21, 0,
-                r02, r12, r22, 0,
-                x,   y,   z,   1
-            };
-
-            if (!TryInitPlacementByMatrix(pl, mRow))
-                TryInitPlacementByMatrix(pl, mCol);
-            TryPlacementSetOrigin(pl, x, y, z);
-            TryPlacementSetAxes(pl, r00, r10, r20, r01, r11, r21, r02, r12, r22);
-
-            part.SetPlacement(pl);
-            TryUpdatePlacement(part);   // применяем сразу
-            return part;
-        }
-
-        /// <summary>
-        /// Создать ksPlacement с полной матрицей (с учётом нижнего слоя).
-        /// </summary>
-        private static ksPlacement CreatePlacement_BottomAware(
-            ksDocument3D doc3D,
-            double x, double y, double z,
-            double rotCWdeg, bool isBottom, char bottomFlipAxis)
-        {
-            ksPlacement pl = TryCreateDefaultPlacement(doc3D);
-            if (pl == null)
+            catch (Exception ex)
             {
-                // Фолбэк: создаём временный пустой компонент и берём его placement
-                var tmp = (ksPart)doc3D.GetPart((short)Part_Type.pNew_Part);
-                pl = (ksPlacement)tmp.GetPlacement();
+                LogAppend(log, "Place5 EX: " + ex.Message);
+                return false;
             }
-
-            double r00, r01, r02, r10, r11, r12, r20, r21, r22;
-            BuildRotationBottomAware(rotCWdeg, isBottom, bottomFlipAxis,
-                                     out r00, out r01, out r02,
-                                     out r10, out r11, out r12,
-                                     out r20, out r21, out r22);
-
-            double[] mRow = {
-                r00, r01, r02, x,
-                r10, r11, r12, y,
-                r20, r21, r22, z,
-                0,   0,   0,   1
-            };
-            double[] mCol = {
-                r00, r10, r20, 0,
-                r01, r11, r21, 0,
-                r02, r12, r22, 0,
-                x,   y,   z,   1
-            };
-
-            if (!TryInitPlacementByMatrix(pl, mRow))
-                TryInitPlacementByMatrix(pl, mCol);
-            TryPlacementSetOrigin(pl, x, y, z);
-            TryPlacementSetAxes(pl, r00, r10, r20, r01, r11, r21, r02, r12, r22);
-
-            return pl;
         }
 
-        /// <summary>
-        /// Быстрый дубликат: CopyPart(source, placement). Если метода нет — null.
-        /// </summary>
-        private static ksPart TryCopyPart(ksDocument3D doc3D, ksPart source, ksPlacement placement)
+        // ===== ksPlacement helpers (типизированные) =====
+        private static bool TryPlacementSetMatrix(ksPlacement pl, double[] m)
         {
             try
             {
-                var t = doc3D.GetType();
-                var res = t.InvokeMember("CopyPart",
-                    System.Reflection.BindingFlags.InvokeMethod | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance,
-                    null, doc3D, new object[] { source, placement }) as ksPart;
-                if (res != null)
+                try
                 {
-                    TryUpdatePlacement(res);
-                    return res;
+                    pl.GetType().InvokeMember("SetMatrix3D",
+                        System.Reflection.BindingFlags.InvokeMethod | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance,
+                        null, pl, new object[] { m });
+                    return true;
                 }
-            }
-            catch { }
-            return null;
-        }
+                catch { }
 
-        private static ksPlacement TryCreateDefaultPlacement(ksDocument3D doc3D)
-        {
-            try
-            {
-                var t = doc3D.GetType();
-                var pl = t.InvokeMember("DefaultPlacement",
-                    System.Reflection.BindingFlags.InvokeMethod | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance,
-                    null, doc3D, new object[] { }) as ksPlacement;
-                if (pl != null) return pl;
-            }
-            catch { }
-            try
-            {
-                var t = doc3D.GetType();
-                var pl = t.InvokeMember("CreatePlacement",
-                    System.Reflection.BindingFlags.InvokeMethod | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance,
-                    null, doc3D, new object[] { }) as ksPlacement;
-                if (pl != null) return pl;
-            }
-            catch { }
-            return null;
-        }
+                try
+                {
+                    pl.GetType().InvokeMember("SetMatrix",
+                        System.Reflection.BindingFlags.InvokeMethod | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance,
+                        null, pl, new object[] { m });
+                    return true;
+                }
+                catch { }
 
-        // ======================= Общие helpers для placement =======================
+                try
+                {
+                    pl.GetType().InvokeMember("PutMatrix3D",
+                        System.Reflection.BindingFlags.InvokeMethod | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance,
+                        null, pl, new object[] { m });
+                    return true;
+                }
+                catch { }
 
-        private static bool TryInitPlacementByMatrix(ksPlacement pl, double[] m)
-        {
-            try
-            {
-                var t = pl.GetType();
                 try
                 {
-                    t.InvokeMember("InitByMatrix3D",
+                    pl.GetType().InvokeMember("PutMatrix",
                         System.Reflection.BindingFlags.InvokeMethod | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance,
-                        null, pl, new object[] { (object)m });
+                        null, pl, new object[] { m });
                     return true;
                 }
                 catch { }
+
                 try
                 {
-                    t.InvokeMember("SetMatrix3D",
+                    pl.GetType().InvokeMember("SetTransform",
                         System.Reflection.BindingFlags.InvokeMethod | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance,
-                        null, pl, new object[] { (object)m });
+                        null, pl, new object[] { m });
                     return true;
                 }
                 catch { }
-                try
-                {
-                    t.InvokeMember("SetTransform",
-                        System.Reflection.BindingFlags.InvokeMethod | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance,
-                        null, pl, new object[] { (object)m });
-                    return true;
-                }
-                catch { }
-                try
-                {
-                    t.InvokeMember("PutMatrix3D",
-                        System.Reflection.BindingFlags.InvokeMethod | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance,
-                        null, pl, new object[] { (object)m });
-                    return true;
-                }
-                catch { }
-                try
-                {
-                    t.InvokeMember("PutMatrix",
-                        System.Reflection.BindingFlags.InvokeMethod | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance,
-                        null, pl, new object[] { (object)m });
-                    return true;
-                }
-                catch { }
+
                 return false;
             }
             catch { return false; }
@@ -669,7 +584,7 @@ namespace Idf2Kompas.Services
                             null, pl, new object[] { x, y, z });
                         return true;
                     }
-                    catch { }
+                    catch { /* следующий */ }
                 }
                 return false;
             }
@@ -704,6 +619,27 @@ namespace Idf2Kompas.Services
                 return true;
             }
             catch { return false; }
+        }
+
+        // === Выбор имени модели строго из ProjectPlacement + AppSettings ===
+        private static string ResolveModelNameBySettings(ProjectPlacement p, AppSettings settings)
+        {
+            if (p == null) return null;
+            string NN(string s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
+
+            var src = (settings?.ModelNameSource ?? "").Trim().ToUpperInvariant();
+
+            // В ProjectPlacement надёжно доступно: Body (из BOM)
+            // Полей PartNameFromIdf/FootprintFromIdf здесь НЕТ, не используем.
+            switch (src)
+            {
+                case "BODY":
+                case "FOOTPRINT":
+                case "NAME":
+                case "COMMENT":
+                default:
+                    return NN(p.Body);
+            }
         }
     }
 }
