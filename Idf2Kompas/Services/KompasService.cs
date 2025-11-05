@@ -159,7 +159,9 @@ namespace Idf2Kompas.Services
             {
                 if (!string.IsNullOrWhiteSpace(asmOutPath))
                 {
-                    Directory.CreateDirectory(Path.GetDirectoryName(asmOutPath) ?? "");
+                    var asmDir = Path.GetDirectoryName(asmOutPath);
+                    if (!string.IsNullOrEmpty(asmDir))
+                        Directory.CreateDirectory(asmDir);
                     doc3D.SaveAs(asmOutPath);
                 }
             }
@@ -170,8 +172,14 @@ namespace Idf2Kompas.Services
             // Лог рядом со сборкой
             try
             {
-                var logPath = Path.Combine(Path.GetDirectoryName(asmOutPath) ?? "", ".placement.log.txt");
-                File.WriteAllText(logPath, placeLog.ToString(), Encoding.UTF8);
+                if (!string.IsNullOrWhiteSpace(asmOutPath))
+                {
+                    var asmDir = Path.GetDirectoryName(asmOutPath);
+                    var logPath = string.IsNullOrEmpty(asmDir)
+                        ? ".placement.log.txt"
+                        : Path.Combine(asmDir, ".placement.log.txt");
+                    File.WriteAllText(logPath, placeLog.ToString(), Encoding.UTF8);
+                }
             }
             catch { }
 

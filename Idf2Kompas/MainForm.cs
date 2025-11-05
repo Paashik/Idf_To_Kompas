@@ -390,17 +390,33 @@ namespace Idf2Kompas
                 }
 
                 // 6) Пути сохранения с правильными именами
-                string brdDir = Path.GetDirectoryName(_brdPath);
-                string csvDir = Path.GetDirectoryName(_csvPath);
+                //string brdDir = Path.GetDirectoryName(_brdPath);
+                // string csvDir = Path.GetDirectoryName(_csvPath);
+                string SafeCombine(string dir, string fileName)
+                {
+                    return string.IsNullOrWhiteSpace(dir) ? fileName : Path.Combine(dir, fileName);
+                }
+
+                string brdDir = string.IsNullOrWhiteSpace(_brdPath) ? null : Path.GetDirectoryName(_brdPath);
+                string csvDir = string.IsNullOrWhiteSpace(_csvPath) ? null : Path.GetDirectoryName(_csvPath);
+
+                string boardBaseRaw = string.IsNullOrWhiteSpace(_brdPath) ? null : Path.GetFileNameWithoutExtension(_brdPath);
+                string boardBase = string.IsNullOrWhiteSpace(boardBaseRaw) ? "board" : boardBaseRaw;
+                string asmBaseRaw = string.IsNullOrWhiteSpace(_csvPath) ? null : Path.GetFileNameWithoutExtension(_csvPath);
 
                 string saveBoardDir = !string.IsNullOrWhiteSpace(_settings.SaveBoardDir) ? _settings.SaveBoardDir : brdDir;
-                string saveAsmDir = !string.IsNullOrWhiteSpace(_settings.SaveAsmDir) ? _settings.SaveAsmDir : csvDir;
+                //string saveAsmDir = !string.IsNullOrWhiteSpace(_settings.SaveAsmDir) ? _settings.SaveAsmDir : csvDir;
+                string defaultAsmDir = !string.IsNullOrWhiteSpace(_csvPath) ? csvDir : brdDir;
+                string saveAsmDir = !string.IsNullOrWhiteSpace(_settings.SaveAsmDir) ? _settings.SaveAsmDir : defaultAsmDir;
 
-                string boardBase = Path.GetFileNameWithoutExtension(_brdPath);
-                string asmBase = Path.GetFileNameWithoutExtension(_csvPath);
+                //string boardBase = Path.GetFileNameWithoutExtension(_brdPath);
+                //string asmBase = Path.GetFileNameWithoutExtension(_csvPath);
+                string asmFileBase = string.IsNullOrWhiteSpace(asmBaseRaw) ? boardBase : asmBaseRaw;
 
-                string boardOutPath = System.IO.Path.Combine(saveBoardDir ?? brdDir, boardBase + ".m3d");
-                string asmOutPath = System.IO.Path.Combine(saveAsmDir ?? csvDir, asmBase + ".a3d");
+                //string boardOutPath = System.IO.Path.Combine(saveBoardDir ?? brdDir, boardBase + ".m3d");
+                //string asmOutPath = System.IO.Path.Combine(saveAsmDir ?? csvDir, asmBase + ".a3d");
+                string boardOutPath = SafeCombine(saveBoardDir, boardBase + ".m3d");
+                string asmOutPath = SafeCombine(saveAsmDir, asmFileBase + ".a3d");
 
                 // 7) Построить в КОМПАС
                 Idf2Kompas.Services.KompasService.BuildAssemblyInKompas(model, _settings, outline, holes, boardOutPath, asmOutPath);
@@ -433,6 +449,13 @@ namespace Idf2Kompas
         
 
         private void MainForm_Load_3(object sender, EventArgs e)
+        {
+
+        }
+
+        
+
+        private void MainForm_Load_4(object sender, EventArgs e)
         {
 
         }
